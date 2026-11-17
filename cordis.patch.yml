@@ -1,0 +1,9 @@
+# dsh-anti-interrupt 的 bundle patch —— 把防中断（守夜）插件挂进 DSH 配置树
+#
+# 约定（DSH 商城预检）：
+#   - id 必须全局唯一且与包名一致（dsh-anti-interrupt），否则候选会被判缺少 entry ID
+#   - "id: 值" 这一行不能写行尾注释，否则正则抓不到 entry ID
+#   - name 解析到包入口 index.js
+- insert:
+    - id: dsh-anti-interrupt
+      name: 'dsh-anti-interrupt'

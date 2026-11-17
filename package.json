@@ -1,0 +1,56 @@
+{
+  "name": "dsh-anti-interrupt",
+  "version": "1.0.0",
+  "description": "DSH 防中断（守夜）：崩溃/重启后自动续跑被中断的回合；Windows 下还可一键关掉屏保与电源超时（关屏/睡眠），防止长任务被打断。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "lib/**",
+    "scripts/**",
+    "locale/*.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "anti-interrupt",
+    "auto-resume",
+    "crash-recovery",
+    "nightwatch",
+    "continuity",
+    "screensaver",
+    "power",
+    "windows"
+  ],
+  "license": "MIT",
+  "author": "ingk888766-cloud",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ingk888766-cloud/dsh-anti-interrupt.git"
+  },
+  "homepage": "https://github.com/ingk888766-cloud/dsh-anti-interrupt#readme",
+  "bugs": {
+    "url": "https://github.com/ingk888766-cloud/dsh-anti-interrupt/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dshReleases": {
+        "0.2.1-rc.5": "compatible",
+        "0.2.2-rc.1": "compatible"
+      }
+    }
+  }
+}
