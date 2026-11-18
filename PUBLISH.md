@@ -181,3 +181,34 @@ install 会真的动 schtasks，故不进单测，用手跑核验。
           同一窗口内无新 cmd.exe 进程
 10:02     普通权限卸载：schtasks exit=0「计划的任务被成功删除」，目录已删，任务已不存在
 ```
+
+## 11. 最终版（wscript + principal）的真杀复验 —— 2026-11-18 10:06
+
+前面 71.9 秒那次跑的是旧版（`cmd.exe` 动作、任务删不掉）。改用 wscript 动作并在 XML 里写
+`<Principals>` 之后，重新做了一次完整往返：
+
+```
+10:06:01  计划任务正常触发（杀之前的那一拍）      guard.log: alive: DeepSeek Harness.exe pid(s) ...
+10:06:21  杀掉 App 主进程                        （turn 18 中断）
+10:07:01  计划任务自己触发                       schtasks: Last Run 10:07:01 / Result 0
+10:07:02  guard.log: started D:\AAAAAA\DeepSH\DeepSeek Harness.exe
+10:07:02  App 主进程 pid 11672 起来               CreationDate 与日志同秒
+10:07:23  插件：不在内存，按前端同一条路恢复会话
+10:07:24  agent/created source=resume
+10:07:25  已自动唤醒会话（boot-6000ms，中断 turn 18）
+```
+
+**杀 → 醒 64 秒**（10:06:21 → 10:07:25），电池供电，零输入。
+
+弹窗判据：复验前后系统里**没有任何 cmd.exe 进程**；任务动作是
+`wscript.exe //B run-guard.vbs`（GUI 子系统，不分配控制台）。
+
+任务当前状态：
+
+```
+<UserId>S-1-5-21-...-1001</UserId>
+<LogonType>InteractiveToken</LogonType>
+<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+<Command>C:\Windows\System32\wscript.exe</Command>
+<Arguments>//B "...\run-guard.vbs"</Arguments>
+```
