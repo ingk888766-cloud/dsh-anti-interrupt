@@ -89,3 +89,46 @@ cd $env:USERPROFILE\.dsh\profiles\desktop
 & $node $pnpm install --frozen-lockfile --lockfile-only --ignore-scripts   # 必须 exit 0
 ```
 
+
+## 9. 启动守护（防杀）—— 2026-11-18 实装与实测
+
+`nightwatch action=guard guardAction=install` / 工具栏「守夜」→「启动守护（防杀）」→ 安装。
+
+装出来的东西：计划任务 `dsh-anti-interrupt-guard`（每分钟一次，`cmd /c run-guard.cmd`）、
+`~/.dsh/nightwatch/boot-guard/{boot-guard.ps1, run-guard.cmd, guard-task.xml, guard.log}`。
+卸载：同一入口点卸载，`schtasks /Delete` + 删目录，两边都会核验。
+
+### 踩到的坑（必须记住）
+
+用 `schtasks /Create /SC MINUTE /MO 1 /TR ...` 建出来的任务，XML 里带的是默认值：
+
+```xml
+<DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+<StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+```
+
+笔记本**用电池时任务永远不启动**，而界面上仍显示 `Status: Ready`、`Next Run Time` 照常往前推。
+实测症状：`Last Run Time = 1999/11/30`、`Last Result = 267011`（= 从未运行），`guard.log` 根本不存在；
+先误判成「脚本坏了」，手跑 `.cmd` 和 `.ps1` 都正常（能写出 `alive`），才定位到触发器。
+
+**修法**：改为用 `/XML` 注册（`guard-task.xml`，UTF-16 带 BOM），显式写
+`DisallowStartIfOnBatteries=false`、`StopIfGoingOnBatteries=false`、`StartWhenAvailable=true`、
+`ExecutionTimeLimit=PT5M`。改完后在电池下（`PowerOnline=False`）任务到点即触发。
+
+### 实测链路（2026-11-18 09:53）
+
+```
+09:53:14  杀掉 App 主进程（turn 15 中断）
+09:54:01  计划任务自己触发（Last Run 09:54:01，Result 0）
+09:54:03  guard.log: started D:\AAAAAA\DeepSH\DeepSeek Harness.exe
+09:54:03  App 主进程 pid 26456（CreationDate 与日志同秒）
+09:54:24  nightwatch.log: 不在内存，按前端同一条路恢复会话
+09:54:26  已自动唤醒会话（boot-6000ms，中断 turn 15）
+```
+
+**杀 → 醒 71.9 秒，电池供电，零输入。**
+
+### 单测
+
+`test/t177-guard.test.mjs` 8/8：只验形状（枚举、并发安全、status 未安装时如实报、launcher 判定、status 不写盘、非法 guardAction 报错）。
+install 会真的动 schtasks，故不进单测，用手跑核验。

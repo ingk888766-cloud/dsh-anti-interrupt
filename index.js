@@ -17,7 +17,7 @@
  *   `agent.followup(msg)` = send(msg, 'next-turn', true) —— 才会 wakeDriver()。
  *   详见 dsh-agent-loop/lib/index.js:806-814（0.2.1）/ :564-577（0.2.2）。
  */
-import { readFile, writeFile, rename, stat, mkdir, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, rename, stat, mkdir, appendFile, rm } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import path from 'node:path';
 import os from 'node:os';
@@ -222,6 +222,7 @@ function guardRoute(flagFile, screenScript, protocol, opts = {}) {
         supported: isWin,
         screenScript,
         screenScriptExists: script.exists,
+        bootGuard: opts.bootGuard ? await opts.bootGuard.status() : null,
         ...result,
       });
     }
@@ -245,6 +246,22 @@ function guardRoute(flagFile, screenScript, protocol, opts = {}) {
         const result = await guardWrite(flagFile, update);
         if (!result.ok) return sendJson(res, 500, { ok: false, error: result.error });
         return sendJson(res, 200, { ok: true, rev: 'v1', ...result });
+      }
+
+      // 启动守护（防杀）：用户显式点「安装」才创建计划任务，卸载就删干净。
+      if (typeof parsed.bootGuard === 'string') {
+        const act = parsed.bootGuard;
+        if (act !== 'status' && act !== 'install' && act !== 'uninstall') {
+          return sendJson(res, 400, { ok: false, error: "bootGuard must be 'status' | 'install' | 'uninstall'" });
+        }
+        if (!opts.bootGuard) return sendJson(res, 501, { ok: false, error: 'boot guard is unavailable in this host' });
+        if (!isWin) return sendJson(res, 501, { ok: false, error: 'boot guard is Windows-only', platform });
+        const out = act === 'install'
+          ? await opts.bootGuard.install()
+          : act === 'uninstall'
+            ? await opts.bootGuard.uninstall()
+            : await opts.bootGuard.status();
+        return sendJson(res, out && out.ok === false ? 500 : 200, { ok: !(out && out.ok === false), rev: 'v1', bootGuard: out });
       }
 
       // screenGuard 不再接受直接写入 —— 只能通过一次性动作触发脚本检查。
@@ -607,6 +624,15 @@ export async function apply(ctx, config = {}) {
     liveness: config.livenessTask ?? 'ZeroOne-Liveness',
   };
   const continuityDir = path.resolve(String(config.continuityDir ?? path.join(dataDir, 'continuity')));
+  // 启动守护（防杀）自成一摊，和上面那套「守夜底座」互不覆盖：
+  // 任务名、目录、脚本都不同，绝不碰 ZeroOne-* 那批已有任务。
+  const bootGuardTask = String(config.bootGuardTask ?? 'dsh-anti-interrupt-guard');
+  const bootGuardDir = path.resolve(String(config.bootGuardDir ?? path.join(dataDir, 'boot-guard')));
+  const bootGuardScriptPath = path.join(bootGuardDir, 'boot-guard.ps1');
+  const bootGuardCmdPath = path.join(bootGuardDir, 'run-guard.cmd');
+  const bootGuardConfigFile = path.join(bootGuardDir, 'guard.json');
+  const bootGuardLogFile = path.join(bootGuardDir, 'guard.log');
+  const bootGuardSourcePath = path.join(PLUGIN_DIR, 'scripts', 'boot-guard.ps1');
   const continuity = createContinuity({ dir: continuityDir, logger: ctx.logger });
   const watchdogInfo = await fileInfo(watchdog);
   const kitInstalled = isWin && watchdogInfo.exists;
@@ -712,6 +738,170 @@ export async function apply(ctx, config = {}) {
     };
   }
 
+  /** 找出「被杀了要拉起来」的那个可执行文件：优先配置，其次当前进程。 */
+  function detectLauncher() {
+    const override = typeof config.shellLauncher === 'string' && config.shellLauncher.trim() !== ''
+      ? config.shellLauncher.trim()
+      : null;
+    if (override) {
+      return { ok: true, path: override, image: path.basename(override), from: 'config.shellLauncher' };
+    }
+    const exe = process.execPath;
+    const base = path.basename(exe);
+    if (!/\.exe$/i.test(base)) {
+      return { ok: false, reason: `当前进程的可执行文件是 ${base}，不是 Windows 程序` };
+    }
+    if (/^(node|electron)\.exe$/i.test(base)) {
+      return {
+        ok: false,
+        reason: `当前跑在 ${base} 下（dsh web / CLI），没有可拉起的窗口式 App；要装请用 config.shellLauncher 指定启动器`,
+      };
+    }
+    return { ok: true, path: exe, image: base, from: 'process.execPath' };
+  }
+
+  async function bootGuardStatus() {
+    const launcher = detectLauncher();
+    const script = await fileInfo(bootGuardScriptPath);
+    const conf = await readJson(bootGuardConfigFile);
+    const task = isWin ? await taskState(bootGuardTask) : { task: bootGuardTask, registered: false, detail: 'non-windows' };
+    return {
+      ok: true,
+      platform: process.platform,
+      supported: isWin && launcher.ok,
+      installed: isWin && script.exists && task.registered === true,
+      task,
+      launcher: launcher.ok ? { path: launcher.path, image: launcher.image, from: launcher.from } : { error: launcher.reason },
+      script,
+      config: conf.ok ? conf.value : null,
+      paths: {
+        dir: bootGuardDir,
+        script: bootGuardScriptPath,
+        cmd: bootGuardCmdPath,
+        log: bootGuardLogFile,
+        task: bootGuardTask,
+      },
+      lastEvents: script.exists ? await tailLines(bootGuardLogFile, 3) : [],
+      what: '创建一个每分钟跑一次的计划任务：App 不在就把它启动起来。卸载会删掉任务和这个目录。',
+    };
+  }
+
+  async function bootGuardInstall() {
+    if (!isWin) return { ok: false, error: 'boot guard is Windows-only', platform: process.platform };
+    const launcher = detectLauncher();
+    if (!launcher.ok) return { ok: false, error: launcher.reason };
+    const src = await fileInfo(bootGuardSourcePath);
+    if (!src.exists) return { ok: false, error: `包内缺少守护脚本：${bootGuardSourcePath}` };
+    await mkdir(bootGuardDir, { recursive: true });
+    await writeFile(bootGuardScriptPath, await readFile(bootGuardSourcePath, 'utf8'), 'utf8');
+    const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    const cmd = [
+      '@echo off',
+      `"${powershell}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${bootGuardScriptPath}" -Launcher "${launcher.path}" -Image "${launcher.image}" -Log "${bootGuardLogFile}"`,
+      '',
+    ].join('\r\n');
+    await writeFile(bootGuardCmdPath, cmd, 'utf8');
+    await writeFile(bootGuardConfigFile, JSON.stringify({
+      task: bootGuardTask,
+      launcher: launcher.path,
+      image: launcher.image,
+      from: launcher.from,
+      installedAt: new Date().toISOString(),
+      by: 'nightwatch-plugin',
+    }, null, 2), 'utf8');
+
+    // 用 XML 注册，而不是 `schtasks /SC MINUTE`：
+    // 后者会带上 DisallowStartIfOnBatteries=true / StopIfGoingOnBatteries=true，
+    // 笔记本在用电池时任务永远不启动，却仍然显示 Ready、下次运行时间照常往前走。
+    // 实测踩到过：任务从注册起一次都没跑，Last Run Time 停在 1999/11/30。
+    const startBoundary = new Date(Date.now() + 60 * 1000);
+    const pad = (n) => String(n).padStart(2, '0');
+    const stamp = `${startBoundary.getFullYear()}-${pad(startBoundary.getMonth() + 1)}-${pad(startBoundary.getDate())}`
+      + `T${pad(startBoundary.getHours())}:${pad(startBoundary.getMinutes())}:00`;
+    const xml = [
+      '<?xml version="1.0" encoding="UTF-16"?>',
+      '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">',
+      '  <RegistrationInfo>',
+      '    <Description>dsh-anti-interrupt: start the DSH app when it is not running.</Description>',
+      '  </RegistrationInfo>',
+      '  <Settings>',
+      '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
+      '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
+      '    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>',
+      '    <AllowHardTerminate>true</AllowHardTerminate>',
+      '    <StartWhenAvailable>true</StartWhenAvailable>',
+      '    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>',
+      '    <IdleSettings>',
+      '      <StopOnIdleEnd>false</StopOnIdleEnd>',
+      '      <RestartOnIdle>false</RestartOnIdle>',
+      '    </IdleSettings>',
+      '    <AllowStartOnDemand>true</AllowStartOnDemand>',
+      '    <Enabled>true</Enabled>',
+      '    <Hidden>false</Hidden>',
+      '    <RunOnlyIfIdle>false</RunOnlyIfIdle>',
+      '    <ExecutionTimeLimit>PT5M</ExecutionTimeLimit>',
+      '    <Priority>7</Priority>',
+      '  </Settings>',
+      '  <Triggers>',
+      '    <TimeTrigger>',
+      '      <Repetition>',
+      '        <Interval>PT1M</Interval>',
+      '        <StopAtDurationEnd>false</StopAtDurationEnd>',
+      '      </Repetition>',
+      `      <StartBoundary>${stamp}</StartBoundary>`,
+      '      <Enabled>true</Enabled>',
+      '    </TimeTrigger>',
+      '  </Triggers>',
+      '  <Actions Context="Author">',
+      '    <Exec>',
+      '      <Command>C:\\Windows\\System32\\cmd.exe</Command>',
+      `      <Arguments>/c "${bootGuardCmdPath}"</Arguments>`,
+      '    </Exec>',
+      '  </Actions>',
+      '</Task>',
+      '',
+    ].join('\r\n');
+    const xmlPath = path.join(bootGuardDir, 'guard-task.xml');
+    // schtasks /XML 读的是 UTF-16（带 BOM）
+    await writeFile(xmlPath, Buffer.from(`\uFEFF${xml}`, 'utf16le'));
+
+    const created = await run('schtasks', ['/Create', '/TN', bootGuardTask, '/XML', xmlPath, '/F'], 30000);
+    const task = await taskState(bootGuardTask);
+    const ok = created.ok && task.registered === true;
+    return {
+      ok,
+      error: ok ? null : (created.stderr.trim() || `schtasks exit ${created.code}`),
+      task,
+      launcher: { path: launcher.path, image: launcher.image, from: launcher.from },
+      files: { script: bootGuardScriptPath, cmd: bootGuardCmdPath, xml: xmlPath, config: bootGuardConfigFile, log: bootGuardLogFile },
+      powerPolicy: { disallowStartIfOnBatteries: false, stopIfGoingOnBatteries: false },
+      schtasks: { exitCode: created.code, stdout: created.stdout.trim().slice(0, 600), stderr: created.stderr.trim().slice(0, 600) },
+      howToRemove: 'nightwatch action=guard guardAction=uninstall（或工具栏「守夜」里点卸载）',
+    };
+  }
+
+  async function bootGuardUninstall() {
+    if (!isWin) return { ok: false, error: 'boot guard is Windows-only', platform: process.platform };
+    const removed = await run('schtasks', ['/Delete', '/TN', bootGuardTask, '/F'], 30000);
+    const task = await taskState(bootGuardTask);
+    let dirRemoved = false;
+    let dirError = null;
+    try {
+      await rm(bootGuardDir, { recursive: true, force: true });
+      dirRemoved = true;
+    } catch (error) {
+      dirError = error && error.message ? error.message : String(error);
+    }
+    const ok = task.registered === false && dirRemoved;
+    return {
+      ok,
+      task,
+      dirRemoved,
+      dirError,
+      schtasks: { exitCode: removed.code, stdout: removed.stdout.trim().slice(0, 400), stderr: removed.stderr.trim().slice(0, 400) },
+    };
+  }
+
   const definition = {
     name: 'nightwatch',
     description: '守夜插件：登录后自动续跑被中断的回合（读检查点并唤醒会话），查看/切换守夜开关，Windows 下还可按一次检查一次屏保与电源（关屏/睡眠）。不会替你改计划任务、不会结束任何进程；没装守夜底座时如实报「未安装」。',
@@ -720,7 +910,8 @@ export async function apply(ctx, config = {}) {
       additionalProperties: false,
       required: ['action'],
       properties: {
-        action: { type: 'string', enum: ['status', 'toggle', 'check', 'checkpoint', 'continuity'] },
+        action: { type: 'string', enum: ['status', 'toggle', 'check', 'checkpoint', 'continuity', 'guard'] },
+        guardAction: { type: 'string', enum: ['status', 'install', 'uninstall'], description: 'guard 用：status 看状态，install 创建每分钟一次的计划任务（App 不在就启动它），uninstall 删掉任务与目录' },
         enabled: { type: 'boolean', description: 'toggle 用：true=开守夜（崩溃后自动续跑），false=关' },
         port: { type: 'integer', description: 'check 用：探测端口，默认 39999（一个没人听的端口）' },
         goal: { type: 'string', description: 'checkpoint 用：这一轮的目标（会写进续跑消息）' },
@@ -732,7 +923,8 @@ export async function apply(ctx, config = {}) {
       schema: { type: 'object', additionalProperties: true },
       render: (_input, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
     },
-    isConcurrencySafe: (input) => input.action === 'status' || input.action === 'check' || input.action === 'continuity',
+    isConcurrencySafe: (input) => input.action === 'status' || input.action === 'check' || input.action === 'continuity'
+      || (input.action === 'guard' && (input.guardAction ?? 'status') === 'status'),
     async execute(input, exec) {
       if (input.action === 'status') return status();
       if (input.action === 'toggle') {
@@ -742,6 +934,13 @@ export async function apply(ctx, config = {}) {
       }
       if (input.action === 'check') {
         return { action: 'check', ...(await check(input.port ?? 39999)) };
+      }
+      if (input.action === 'guard') {
+        const sub = input.guardAction ?? 'status';
+        if (sub === 'install') return { action: 'guard', guardAction: sub, ...(await bootGuardInstall()) };
+        if (sub === 'uninstall') return { action: 'guard', guardAction: sub, ...(await bootGuardUninstall()) };
+        if (sub === 'status') return { action: 'guard', guardAction: sub, ...(await bootGuardStatus()) };
+        throw new Error("guard 需要 guardAction: 'status' | 'install' | 'uninstall'");
       }
       if (input.action === 'checkpoint') {
         // 会话身份只能从工具执行上下文拿：exec.agent.session.id（ToolExecutionInput.agent 由 agent loop 填）
@@ -879,6 +1078,7 @@ export async function apply(ctx, config = {}) {
         platform: process.platform,
         originalFile,
         powerFile,
+        bootGuard: { status: bootGuardStatus, install: bootGuardInstall, uninstall: bootGuardUninstall },
       }),
     }), 'nightwatch.guard-route');
     ctx.effect(() => ctx.webServer.register({

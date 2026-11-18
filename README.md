@@ -46,7 +46,8 @@ dsh plugin add dsh-anti-interrupt
 另外：
 
 - 不联网，没有遥测。
-- 不建计划任务，不改启动项，不杀进程。
+- 不改启动项，不杀进程。
+- **默认不创建任何计划任务。** 只有你在「启动守护」里点安装，才会建 `dsh-anti-interrupt-guard` 这一条，点卸载就删掉。
 - 不需要管理员权限。
 - 只对当前电源方案生效，换了方案要再点一次。
 - 是一次性动作。点完之后别的软件再改电源计划，它不会自己改回来。
@@ -54,13 +55,19 @@ dsh plugin add dsh-anti-interrupt
 
 数据都在 `<DSH_HOME 或 ~/.dsh>/nightwatch/` 下：开关状态、电源基线、检查点、`continuity/nightwatch.log`。检查点只有 turn 号、最后一次工具调用、目标与下一步，不存对话内容。
 
-## 「防重启中断」和守夜底座
+## 「防重启中断」：让 App 被杀后自己回来
 
-那个开关管另一件事：DSH 被关掉之后，由外部的看门狗把它重新拉起来，再由自动续跑把回合接上。
+自动续跑只在 DSH 重新起来之后才起作用。要让 DSH 自己回来，得有人在外面盯着——插件内置了一个启动守护，但要你点一下才会装。
 
-看门狗不在这个包里。它要在目标机器上创建计划任务，权限不低，不适合跟着 npm 包一起静默安装。没装的时候，`status` 会返回 `guardKit.installed = false`，`check` 返回 `skipped`，那个开关只剩下「自动续跑的闸门」一个作用，界面上也这么写。
+**装什么**：一个名叫 `dsh-anti-interrupt-guard` 的 Windows 计划任务，每分钟跑一次；App 不在就启动它。脚本、任务定义、日志都在 `~/.dsh/nightwatch/boot-guard/` 下。
 
-自动续跑本身不依赖看门狗。引擎被重启、或者你自己重新打开 DSH，都够用。看门狗只是让「连窗口一起被杀」的时候也能自己回来。
+**怎么装**：输入框工具栏「守夜」→「启动守护（防杀）」→ 安装；或者 `nightwatch action=guard guardAction=install`。
+
+**怎么卸**：同一处点卸载，或者 `nightwatch action=guard guardAction=uninstall`。卸完任务和目录都会删掉。
+
+不装它也能用：引擎被 supervisor 重启、或者你自己重新打开 DSH，回合都会自动接上，只是窗口不会自己弹回来。
+
+> 任务用的是 XML 注册，显式关掉了「电池供电时不启动」。`schtasks /SC MINUTE` 的默认值会让笔记本在电池下永远不跑这个任务，界面上却仍然显示 Ready、下次运行时间照常往前走——这个坑实测踩到过，任务从注册起一次都没执行。
 
 ## 使用
 
@@ -71,6 +78,7 @@ dsh plugin add dsh-anti-interrupt
 | `nightwatch action=checkpoint goal=… nextAction=…` | 写检查点，续跑消息会带上 |
 | `nightwatch action=continuity` | 读回本会话的检查点 |
 | `nightwatch action=check` | 干跑一次看门狗自检 |
+| `nightwatch action=guard guardAction=status\|install\|uninstall` | 启动守护：看状态 / 装计划任务 / 删干净 |
 
 界面：输入框工具栏「守夜」按钮。
 HTTP：`GET|POST /api/nightwatch/guard`，`POST {"screenAction":"status|disable|restore"}`。
@@ -83,7 +91,7 @@ HTTP：`GET|POST /api/nightwatch/guard`，`POST {"screenAction":"status|disable|
 |---|---|
 | 0.2.1-rc.5，只杀引擎，外壳把它拉起来 | 约 40 秒，工具集完整 |
 | 0.2.1-rc.5，连外壳一起杀，外部看门狗重开 | 约 83 秒（看门狗一分钟一班） |
-| 0.2.2-rc.1，整个 App 被杀，外部看门狗拉起 | 31.8 秒。09:11:23 杀，09:11:56.8 唤醒 |
+| 0.2.2-rc.1，整个 App 被杀，**插件自己装的启动守护**拉起 | 71.9 秒。09:53:14 杀，09:54:03 守护启动 App，09:54:26 唤醒 |
 | 0.2.2-rc.1，你自己重新打开 App | 启动后第一次扫描就在 6 秒那拍接上 |
 | 屏保、电源四组开关组合（0.2.1-rc.5） | 四组都过，走的是真实点击 |
 
@@ -91,9 +99,10 @@ HTTP：`GET|POST /api/nightwatch/guard`，`POST {"screenAction":"status|disable|
 
 ### 没测到的
 
-- 让窗口自己弹回来需要外部看门狗，它不在包里。只装这个包时，能自动回来的是「引擎被重启」和「你自己重新打开 DSH」两种，这两种都会自动续跑。
+- 启动守护只在 Windows 上做过。电池那一侧验过（笔记本、`PowerOnline=False` 下任务确实触发并启动了 App），交流电那一侧没单独验。
+- 没在第二台机器上装过；换机器后靠 `process.execPath` 推启动器，这个只在本机验过。
 - 睡眠本身没做破坏性实测——把电池的睡眠设成「从不」之后就不会触发了。
-- macOS 和 Linux 上只保证自动续跑，屏保、电源那部分没跑过。
+- macOS 和 Linux 上只保证自动续跑，屏保、电源、启动守护都不参与。
 
 ## 卸载
 
