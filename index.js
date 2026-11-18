@@ -630,6 +630,7 @@ export async function apply(ctx, config = {}) {
   const bootGuardDir = path.resolve(String(config.bootGuardDir ?? path.join(dataDir, 'boot-guard')));
   const bootGuardScriptPath = path.join(bootGuardDir, 'boot-guard.ps1');
   const bootGuardCmdPath = path.join(bootGuardDir, 'run-guard.cmd');
+  const bootGuardVbsPath = path.join(bootGuardDir, 'run-guard.vbs');
   const bootGuardConfigFile = path.join(bootGuardDir, 'guard.json');
   const bootGuardLogFile = path.join(bootGuardDir, 'guard.log');
   const bootGuardSourcePath = path.join(PLUGIN_DIR, 'scripts', 'boot-guard.ps1');
@@ -778,6 +779,7 @@ export async function apply(ctx, config = {}) {
         dir: bootGuardDir,
         script: bootGuardScriptPath,
         cmd: bootGuardCmdPath,
+        vbs: bootGuardVbsPath,
         log: bootGuardLogFile,
         task: bootGuardTask,
       },
@@ -801,6 +803,18 @@ export async function apply(ctx, config = {}) {
       '',
     ].join('\r\n');
     await writeFile(bootGuardCmdPath, cmd, 'utf8');
+
+    // 弹窗问题：任务动作若直接是 cmd.exe / powershell.exe，Task Scheduler 每分钟会闪一个控制台窗口
+    // （-WindowStyle Hidden 只藏 PowerShell 自己的窗口，藏不住被拉起的 cmd 宿主）。
+    // 改用 wscript.exe //B 跑一个 VBS，WScript.Shell.Run 的窗口样式传 0，全程无控制台。
+    const powershellLine = `"${powershell}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${bootGuardScriptPath}" -Launcher "${launcher.path}" -Image "${launcher.image}" -Log "${bootGuardLogFile}"`;
+    const vbs = [
+      'Set sh = CreateObject("WScript.Shell")',
+      `sh.Run "${powershellLine.replace(/"/g, '""')}", 0, False`,
+      '',
+    ].join('\r\n');
+    await writeFile(bootGuardVbsPath, vbs, 'ascii');
+
     await writeFile(bootGuardConfigFile, JSON.stringify({
       task: bootGuardTask,
       launcher: launcher.path,
@@ -814,6 +828,16 @@ export async function apply(ctx, config = {}) {
     // 后者会带上 DisallowStartIfOnBatteries=true / StopIfGoingOnBatteries=true，
     // 笔记本在用电池时任务永远不启动，却仍然显示 Ready、下次运行时间照常往前走。
     // 实测踩到过：任务从注册起一次都没跑，Last Run Time 停在 1999/11/30。
+    //
+    // 还有一条必须写的：<Principals>。不写的话任务落在 Administrators 名下，
+    // 当前用户对 C:\Windows\System32\Tasks\<name> 只有 (R)，`schtasks /Delete` 直接「拒绝访问」，
+    // 用户自己卸不掉。实测：不带 Principals 删不掉，带上就能用普通权限删。
+    const who = await run('whoami', ['/user', '/fo', 'csv', '/nh'], 15000);
+    const sidMatch = (who.stdout || '').match(/(S-1-[0-9-]+)/);
+    const userSid = sidMatch ? sidMatch[1] : null;
+    if (!userSid) {
+      return { ok: false, error: `取不到当前用户 SID，放弃创建任务（宁可没装，也不给你留一个卸不掉的任务）：${who.stderr.trim() || who.stdout.trim()}` };
+    }
     const startBoundary = new Date(Date.now() + 60 * 1000);
     const pad = (n) => String(n).padStart(2, '0');
     const stamp = `${startBoundary.getFullYear()}-${pad(startBoundary.getMonth() + 1)}-${pad(startBoundary.getDate())}`
@@ -824,6 +848,13 @@ export async function apply(ctx, config = {}) {
       '  <RegistrationInfo>',
       '    <Description>dsh-anti-interrupt: start the DSH app when it is not running.</Description>',
       '  </RegistrationInfo>',
+      '  <Principals>',
+      '    <Principal id="Author">',
+      `      <UserId>${userSid}</UserId>`,
+      '      <LogonType>InteractiveToken</LogonType>',
+      '      <RunLevel>LeastPrivilege</RunLevel>',
+      '    </Principal>',
+      '  </Principals>',
       '  <Settings>',
       '    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>',
       '    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>',
@@ -854,8 +885,8 @@ export async function apply(ctx, config = {}) {
       '  </Triggers>',
       '  <Actions Context="Author">',
       '    <Exec>',
-      '      <Command>C:\\Windows\\System32\\cmd.exe</Command>',
-      `      <Arguments>/c "${bootGuardCmdPath}"</Arguments>`,
+      '      <Command>C:\\Windows\\System32\\wscript.exe</Command>',
+      `      <Arguments>//B "${bootGuardVbsPath}"</Arguments>`,
       '    </Exec>',
       '  </Actions>',
       '</Task>',
@@ -873,7 +904,7 @@ export async function apply(ctx, config = {}) {
       error: ok ? null : (created.stderr.trim() || `schtasks exit ${created.code}`),
       task,
       launcher: { path: launcher.path, image: launcher.image, from: launcher.from },
-      files: { script: bootGuardScriptPath, cmd: bootGuardCmdPath, xml: xmlPath, config: bootGuardConfigFile, log: bootGuardLogFile },
+      files: { script: bootGuardScriptPath, cmd: bootGuardCmdPath, vbs: bootGuardVbsPath, xml: xmlPath, config: bootGuardConfigFile, log: bootGuardLogFile },
       powerPolicy: { disallowStartIfOnBatteries: false, stopIfGoingOnBatteries: false },
       schtasks: { exitCode: created.code, stdout: created.stdout.trim().slice(0, 600), stderr: created.stderr.trim().slice(0, 600) },
       howToRemove: 'nightwatch action=guard guardAction=uninstall（或工具栏「守夜」里点卸载）',
@@ -884,17 +915,24 @@ export async function apply(ctx, config = {}) {
     if (!isWin) return { ok: false, error: 'boot guard is Windows-only', platform: process.platform };
     const removed = await run('schtasks', ['/Delete', '/TN', bootGuardTask, '/F'], 30000);
     const task = await taskState(bootGuardTask);
+    // 任务没删掉时**绝不能删脚本目录**：那会留下一个每分钟去执行不存在文件的空壳任务，
+    // 每分钟闪一次错误窗口，比装之前更糟。实测踩到过一次。
     let dirRemoved = false;
     let dirError = null;
-    try {
-      await rm(bootGuardDir, { recursive: true, force: true });
-      dirRemoved = true;
-    } catch (error) {
-      dirError = error && error.message ? error.message : String(error);
+    if (task.registered) {
+      dirError = '任务还在，脚本目录先保留（否则任务每分钟会去执行不存在的文件）';
+    } else {
+      try {
+        await rm(bootGuardDir, { recursive: true, force: true });
+        dirRemoved = true;
+      } catch (error) {
+        dirError = error && error.message ? error.message : String(error);
+      }
     }
-    const ok = task.registered === false && dirRemoved;
+    const ok = task.registered === false;
     return {
       ok,
+      error: ok ? null : (removed.stderr.trim() || removed.stdout.trim() || `schtasks exit ${removed.code}`),
       task,
       dirRemoved,
       dirError,

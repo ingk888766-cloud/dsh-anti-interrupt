@@ -132,3 +132,52 @@ cd $env:USERPROFILE\.dsh\profiles\desktop
 
 `test/t177-guard.test.mjs` 8/8：只验形状（枚举、并发安全、status 未安装时如实报、launcher 判定、status 不写盘、非法 guardAction 报错）。
 install 会真的动 schtasks，故不进单测，用手跑核验。
+
+## 10. 启动守护收尾：三个必须记住的坑（2026-11-18）
+
+### 坑一：`schtasks /SC MINUTE` 默认「电池供电不启动」
+
+用标志位建任务，XML 里会带 `DisallowStartIfOnBatteries=true` / `StopIfGoingOnBatteries=true`。
+笔记本在电池下任务永远不跑，界面却仍显示 `Status: Ready`、`Next Run Time` 照常推进。
+症状：`Last Run Time = 1999/11/30`、`Last Result = 267011`、日志文件根本不存在。
+修法：改用 `/XML` 注册，显式写 `false`。
+
+### 坑二：`/XML` 不写 `<Principals>`，任务删不掉
+
+注册出来的任务 ACL 是 `O231005\OQY:(R)`，`BUILTIN\Administrators:(F)`。用户只有读权限，
+`schtasks /Delete` 报「拒绝访问」，**用户自己卸不掉**，只能提权删。
+修法：XML 里带上当前用户 SID：
+
+```xml
+<Principals>
+  <Principal id="Author">
+    <UserId>S-1-5-21-...</UserId>
+    <LogonType>InteractiveToken</LogonType>
+    <RunLevel>LeastPrivilege</RunLevel>
+  </Principal>
+</Principals>
+```
+
+实测对照：不带 Principals 建的任务普通权限删不掉；带上就能删（`nw-acl-probe` 探针验过）。
+代码里现在取不到 SID 就直接放弃安装——宁可没装，也不给用户留一个删不掉的任务。
+
+### 坑三：任务动作直接写 `cmd.exe` / `powershell.exe` 会每分钟闪黑窗
+
+`-WindowStyle Hidden` 只藏 PowerShell 自己的窗口，藏不住 Task Scheduler 拉起的 `cmd.exe` 宿主。
+用户体感就是「老是有命令窗口弹出来」。
+修法：动作改成 `wscript.exe //B "<dir>\run-guard.vbs"`，VBS 里
+`WScript.Shell.Run "...", 0, False`——wscript 是 GUI 子系统，不分配控制台。
+实测：任务 10:01:01 触发并写出 `alive` 日志，同一时间窗内没有新的 `cmd.exe` 进程。
+
+### 卸载的保护
+
+`bootGuardUninstall()` 现在先删任务、再查状态：**任务还在就不删脚本目录**。
+否则会留下一个每分钟去执行不存在文件的空壳任务，每分钟闪一次错误窗口——比装之前更糟。
+
+### 实测往返（2026-11-18 10:00）
+
+```
+10:01:01  任务自己触发，guard.log: alive: DeepSeek Harness.exe pid(s) ...
+          同一窗口内无新 cmd.exe 进程
+10:02     普通权限卸载：schtasks exit=0「计划的任务被成功删除」，目录已删，任务已不存在
+```
