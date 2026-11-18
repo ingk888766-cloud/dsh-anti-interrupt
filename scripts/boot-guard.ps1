@@ -8,6 +8,7 @@ param(
     [Parameter(Mandatory = $true)][string]$Image,
     [string]$Log = '',
     [string]$WorkDir = '',
+    [string]$FlagFile = '',
     [switch]$DryRun
 )
 
@@ -17,6 +18,28 @@ function Write-Log([string]$message) {
     if ([string]::IsNullOrWhiteSpace($Log)) { return }
     $line = '{0} {1}' -f (Get-Date).ToString('o'), $message
     try { $line | Out-File -Append -Encoding utf8 -FilePath $Log } catch { }
+}
+
+# Toggle off means the user does not want the app brought back automatically.
+# In that case do nothing at all, not even logging (one line a minute would
+# grow the log by megabytes within days).
+# Only enabled === true counts as on; a missing file, broken JSON or missing
+# field all fall back to "off".
+if (-not [string]::IsNullOrWhiteSpace($FlagFile)) {
+    $enabled = $false
+    try {
+        if (Test-Path -LiteralPath $FlagFile) {
+            $raw = Get-Content -LiteralPath $FlagFile -Raw
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                $state = $raw | ConvertFrom-Json
+                if ($state.enabled -eq $true) { $enabled = $true }
+            }
+        }
+    } catch { }
+    if (-not $enabled) {
+        if ($DryRun) { Write-Log 'dry-run: toggle is off, would not start anything' }
+        exit 0
+    }
 }
 
 $running = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($Image)) -ErrorAction SilentlyContinue)

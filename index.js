@@ -799,7 +799,7 @@ export async function apply(ctx, config = {}) {
     const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
     const cmd = [
       '@echo off',
-      `"${powershell}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${bootGuardScriptPath}" -Launcher "${launcher.path}" -Image "${launcher.image}" -Log "${bootGuardLogFile}"`,
+      `"${powershell}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${bootGuardScriptPath}" -Launcher "${launcher.path}" -Image "${launcher.image}" -Log "${bootGuardLogFile}" -FlagFile "${flagFile}"`,
       '',
     ].join('\r\n');
     await writeFile(bootGuardCmdPath, cmd, 'utf8');
@@ -807,7 +807,7 @@ export async function apply(ctx, config = {}) {
     // 弹窗问题：任务动作若直接是 cmd.exe / powershell.exe，Task Scheduler 每分钟会闪一个控制台窗口
     // （-WindowStyle Hidden 只藏 PowerShell 自己的窗口，藏不住被拉起的 cmd 宿主）。
     // 改用 wscript.exe //B 跑一个 VBS，WScript.Shell.Run 的窗口样式传 0，全程无控制台。
-    const powershellLine = `"${powershell}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${bootGuardScriptPath}" -Launcher "${launcher.path}" -Image "${launcher.image}" -Log "${bootGuardLogFile}"`;
+    const powershellLine = `"${powershell}" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "${bootGuardScriptPath}" -Launcher "${launcher.path}" -Image "${launcher.image}" -Log "${bootGuardLogFile}" -FlagFile "${flagFile}"`;
     const vbs = [
       'Set sh = CreateObject("WScript.Shell")',
       `sh.Run "${powershellLine.replace(/"/g, '""')}", 0, False`,
