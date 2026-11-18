@@ -1,7 +1,7 @@
 {
   "name": "dsh-anti-interrupt",
   "version": "1.0.0",
-  "description": "DSH 防中断（守夜）：崩溃/重启后自动续跑被中断的回合；Windows 下还可一键关掉屏保与电源超时（关屏/睡眠），防止长任务被打断。",
+  "description": "DSH 长任务防中断：被杀或崩溃后自动接上被打断的回合；Windows 上还能关掉屏保和睡眠，不让任务停在半路。",
   "type": "module",
   "main": "index.js",
   "icon": "assets/icon.png",
