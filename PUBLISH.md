@@ -44,3 +44,48 @@ git push -u origin main --tags
 
 - 不联网；数据全在 `~/.dsh/nightwatch/`（或 `DSH_HOME` 下）。
 - 检查点只存 turn 号、最后工具调用、目标/下一步，不存对话正文。
+
+## 8. 官方桌面版（0.2.2-rc.1）真杀实测记录
+
+2026-11-18 两次实杀，第二次是完整链路：
+
+| 时刻（+08） | 事件 | 出处 |
+|---|---|---|
+| 09:11:16 | 看门狗起来（`Win32_Process.Create` 拉起，父进程 `WmiPrvSE.exe`，不在 App 进程树里） | `guard.log` |
+| 09:11:23 | `Stop-Process -Force` 杀掉 App 主进程，落在 turn 5 step 6 | 续跑消息记录的中断点 |
+| 09:11:28 | 看门狗：`app gone after 7200ms` | `guard.log` |
+| 09:11:31 | 看门狗拉起 App，主进程 pid 26448 | `guard.log` + `CreationDate` |
+| 09:11:54 | 插件：`不在内存，按前端同一条路恢复会话（sessionController）` | `nightwatch.log` |
+| 09:11:56.801 | `已自动唤醒会话 …（boot-6000ms，中断 turn 5，来源 native-turn-end）` | `nightwatch.log` |
+
+**杀 → 醒 = 31.8 秒，全程零用户输入。**
+
+### 关键教训：看门狗不能由 App 的子孙进程来当
+
+第一版把 relauncher 用 `Start-Process` 从会话里起，它是 App 进程树里的子孙——`Stop-Process` 一杀 App，它跟着一起死（`relaunch.log` 只留下 `armed` 一行，永远等不到 `app exited`）。  
+**必须让看门狗脱离 App 进程树**：计划任务（Task Scheduler 拉起）或 `Win32_Process.Create`（父进程变成 `WmiPrvSE.exe`）都可以。
+
+### 另一个坑：硬杀后可能触发官方的认证故障
+
+反复硬杀后重启，可能出现窗口标题「DeepSeek Harness 无法使用」，崩溃日志为：
+
+```
+Error: desktop welcome: Web authentication failed
+    at connectDesktopWelcome (.../app.asar/lib/main.js:16856:31)
+```
+
+这不是插件的问题（把插件从 profile 移除后仍然复现）。原因是 Electron session 里残留了上一代 host 的认证 cookie。修法：关掉 App → 备份并删除
+`%APPDATA%\@deepseek-ai\dsh-desktop\Network\Cookies` → 重开。
+
+### 手动装包后必须同步 lockfile
+
+官方 App 启动时会跑 `pnpm install --frozen-lockfile`。手工往 `package.json` 里加依赖却不更新 lockfile，会导致安装失败、引擎不启动，表现同样是「无法使用」。装完依赖后必须跑一次：
+
+```powershell
+$node='D:\AAAAAA\DeepSH\resources\runtime\primary-runtime\dependencies\node\bin\node.exe'
+$pnpm='D:\AAAAAA\DeepSH\resources\runtime\primary-runtime\dependencies\pnpm\bin\pnpm.mjs'
+cd $env:USERPROFILE\.dsh\profiles\desktop
+& $node $pnpm install --no-frozen-lockfile --ignore-scripts
+& $node $pnpm install --frozen-lockfile --lockfile-only --ignore-scripts   # 必须 exit 0
+```
+
