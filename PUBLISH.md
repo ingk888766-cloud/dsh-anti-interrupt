@@ -212,3 +212,46 @@ install 会真的动 schtasks，故不进单测，用手跑核验。
 <Command>C:\Windows\System32\wscript.exe</Command>
 <Arguments>//B "...\run-guard.vbs"</Arguments>
 ```
+
+## 12. 用户自测：关掉开关的门禁 + 又一次真杀（2026-11-18 10:22-10:25）
+
+### 开关门禁（不杀 App 的实证，走真实计划任务）
+
+```
+阶段 1  开关 enabled=false，等 120 秒
+        task Last Run Time = 10:14:01（任务确实跑了）
+        guard.log 未生成            <- 门禁处退出，没检查、没启动
+
+阶段 2  开关 enabled=true，等 30 秒
+        10:15:02  guard.log: alive: DeepSeek Harness.exe pid(s) ...
+```
+
+单独的门禁单测（把 `-Image` 换成一个不存在的名字，保证不会真启动）：
+
+```
+A 开关关            -> exit=0，日志未生成，没有启动任何进程
+B 开关开 + DryRun   -> exit=2，日志「would start ...」
+```
+
+同时修掉一个自己引入的坑：往这个脚本里写中文注释导致 PowerShell 5.1 解析失败
+（脚本必须纯 ASCII，PS 5.1 把无 BOM 的 UTF-8 当 ANSI 读）。
+现在脚本非 ASCII 字节数 = 0，PS 解析 0 错误。
+
+### 用户自己杀的那一刀
+
+```
+10:24:02  任务那一拍：App 还在            guard.log: alive: ...
+10:24:16  用户杀掉（当时正在空跑 turn 22）
+10:25:01  计划任务自己触发                schtasks: Last Run 10:25:01 / Result 0
+10:25:02  guard.log: started D:\AAAAAA\DeepSH\DeepSeek Harness.exe
+10:25:02  新主进程 pid 8104               CreationDate 与日志同秒
+10:25:22  nightwatch.log: 不在内存，按前端同一条路恢复会话
+10:25:24  已自动唤醒会话（boot-6000ms，中断 turn 22，来源 own-checkpoint-open）
+```
+
+**杀 → 醒 约 68 秒，零输入。**
+
+检查点落盘可核：`interruptedTurn=22`、`interruptSource=own-checkpoint-open`、
+`handledThroughTurn=22`、`ack=true`。
+
+至此两条中断检测路径都真杀验过：`native-turn-end`（10:06 那次）与 `own-checkpoint-open`（10:24 这次）。
