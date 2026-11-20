@@ -255,3 +255,44 @@ B 开关开 + DryRun   -> exit=2，日志「would start ...」
 `handledThroughTurn=22`、`ack=true`。
 
 至此两条中断检测路径都真杀验过：`native-turn-end`（10:06 那次）与 `own-checkpoint-open`（10:24 这次）。
+
+## 13. npm 发布完成 —— 2026-11-20 13:03
+
+```
+npm publish --access public
++ dsh-anti-interrupt@1.0.0
+registry: versions = 0.0.0-stage, 1.0.0    latest = 1.0.0
+shasum  = 62bbab0710cf82e592458fb4ced0fcca6b7e15fc
+tarball = https://registry.npmjs.org/dsh-anti-interrupt/-/dsh-anti-interrupt-1.0.0.tgz
+files   = 13
+```
+
+干净目录里 `npm install dsh-anti-interrupt@1.0.0` 装出来 version=1.0.0、`icon = assets/icon.png`。
+
+### 踩到的坑：发布后 packument 先只显示 0.0.0-stage
+
+首次发布时 registry 立刻出现一个占位版本：
+
+```
+version   = 0.0.0-stage
+描述      = Temporary package placeholder for staged publishing
+dist-tags = { latest: 0.0.0-stage }
+```
+
+`1.0.0` 读不到，重发一次却报：
+
+```
+E403 You cannot publish over the previously published versions: 1.0.0.
+```
+
+也就是说 **1.0.0 已经写进 registry，只是读取侧还没刷新**（npm 自己也提示
+"Your package is being processed and may take a few minutes to become available"）。
+约 2 分钟后 packument 更新为 `versions = 0.0.0-stage, 1.0.0`、`latest = 1.0.0`。
+
+占位版本已废弃：`npm deprecate dsh-anti-interrupt@0.0.0-stage "placeholder created by npm; use 1.0.0"`。
+
+### 对市场的影响
+
+市场搜索用的 `index.json` 只收 npm 源条目（6244 条，source.type 全是 npm）。
+包上 npm 之后，下一次夜间构建（`23 2 * * *` UTC = 北京 10:23）就会把我们收进去。
+在那之前 index.json 里仍然查不到。
